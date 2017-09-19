@@ -1,0 +1,294 @@
+---
+title: "Single cell RNA sequencing of N2A cells transfected with eGFP-Bsn"
+csl: nature.csl
+link-citations: yes
+output:
+  html_document: default
+  html_notebook: default
+bibliography: references.bib
+---
+
+Author: Max Kaufmann, MD, 30th August 2017
+
+This R Notebook includes all data analysis steps performed on the single cell RNA sequencing (scRNA-seq) dataset of N2A cells transfected with eGFP-Bsn. The output from the dropseq pipeline as the startingpoint of this script is supplied as "star_gene_exon_tagged.dge.500cells.txt.gz".
+
+## General workflow
+* We use the Seurat package (http://satijalab.org/seurat/) [@Macosko2015] to perform quality control and consequential subsetting of the data as well as cell cycle correction.
+* A pseudotime trajectory based on the expression of Bsn is devised using the Monocle package (http://cole-trapnell-lab.github.io/monocle-release/) [@Trapnell2014; @Qiu2017a; @Qiu2017b]
+* Genes significantly correlated with pseudotime were analysed for GO term enrichment using Gene Set Enrichment Analysis (GSEA) (http://software.broadinstitute.org/gsea/) [@Subramanian2005; @Mootha2003]
+
+## Required libraries
+The package versions originally used to produce the figures are indicated as comments
+
+```{r, message=FALSE}
+library(plyr) #version 1.8.4
+library(dplyr) #version 0.5.0
+library(Seurat) #version 2.0.0
+library(Matrix) #version 1.2-10
+library(RColorBrewer) #version 1.1-2
+library(monocle) #version 2.4.0
+library(gsubfn) #version 0.6-6
+library(Hmisc) #version 4.0-2
+```
+
+## load raw data
+The provided digital gene expression matrix contains information for 500 cells and 16212 genes. As the eGFP-Bsn vector used for the experiment contains rat Bsn we built a costum reference genome, where the murine Bsn sequence was replaced with rat Bsn. Thus, the gene name "Bsn_rat" is used throughout data analysis.
+
+```{r}
+dge.matrix <- read.delim("star_gene_exon_tagged.dge.500cells.txt.gz")
+rownames(dge.matrix) <- dge.matrix[,1]
+dge.matrix <- dge.matrix[,2:ncol(dge.matrix)]
+```
+
+## Create Seurat object and perform basic quality control
+We use mitochonrial transcripts, UMI counts and number of detected genes as quality control (QC) parameters. This is based on empirical findings from a study comparing multiple QC metrics[@Ilicic2016].
+
+```{r}
+cells <- CreateSeuratObject(raw.data = dge.matrix, min.cells = 3, min.genes = 200, project = "Bsn")
+mito.genes <- grep(pattern = "^mt-", x = rownames(x = cells@data), value = TRUE)
+percent.mito <- colSums(cells@raw.data[mito.genes, ])/colSums(cells@raw.data)
+cells <- AddMetaData(object = cells, metadata = percent.mito, col.name = "percent.mito")
+VlnPlot(object = cells, features.plot = c("nGene", "nUMI", "percent.mito"), nCol = 3)
+par(mfrow = c(1, 2))
+GenePlot(object = cells, gene1 = "nUMI", gene2 = "percent.mito")
+GenePlot(object = cells, gene1 = "nUMI", gene2 = "nGene")
+```
+
+## Subset data based on QC
+```{r}
+cells <- FilterCells(object = cells, subset.names = c("nGene", "percent.mito"), 
+         low.thresholds = c(500, -Inf), high.thresholds = c(Inf, 0.05))
+```
+
+## Normalize data
+Normalizes the gene expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result
+
+```{r}
+cells <- NormalizeData(object = cells)
+```
+
+## Find variable genes
+```{r,message=FALSE}
+cells <- FindVariableGenes(object = cells, do.contour = FALSE)
+```
+As expected Bsn_rat is found to be a clear outlier on the dispersion plot
+
+## Scale data and regress for number of UMIs and mitochondrial transcript abundance
+```{r, results='hide'}
+cells <- ScaleData(object = cells, vars.to.regress = c("nUMI", "percent.mito"), 
+    display.progress = FALSE)
+```
+
+## Assign cell cycle scores
+The assignment of a cell cycle phase to each cell is based on the following vignette: http://satijalab.org/seurat/cell_cycle_vignette.html
+The marker genes used were originally tested in mouse hematopoietic stem cells [@Kowalczyk2015].
+```{r}
+s.genes <- readLines(con = "./mouse_S.txt")
+g2m.genes <- readLines(con = "./mouse_G2M.txt")
+cells <- CellCycleScoring(object = cells, s.genes = s.genes, g2m.genes = g2m.genes, set.ident = TRUE)
+head(x = cells@meta.data)
+```
+
+## Dimensionality reduction (Principal component analysis)
+```{r}
+cells <- RunPCA(object = cells, do.print = FALSE, pcs.compute = 100)
+PCElbowPlot(cells, num.pc = 100)
+```
+According to the 'elbow' in the plot we use 10 PCs for downstream analysis
+
+## tSNE visualization of cell cycle and Bsn expression
+```{r}
+cells <- RunTSNE(cells, dims.use = 1:10, do.fast = T)
+TSNEPlot(cells, pt.size = 4)
+FeaturePlot(cells, "Bsn_rat", cols.use = brewer.pal(9, "YlOrRd"), pt.size = 4)
+```
+The clustering of the cells is strongly driven by cell cycle phase. Cells highly expressing Bsn are mainly found in the G1 cluster.
+
+## Regress for cell cycle
+```{r, results='hide'}
+cells <- ScaleData(object = cells, vars.to.regress = c("nUMI", "percent.mito", "S.Score", "G2M.Score"), display.progress = FALSE)
+```
+
+## Dimensionality reduction (Principal component analysis) after regression
+```{r}
+cells <- RunPCA(object = cells, do.print = FALSE, pcs.compute = 100)
+PCElbowPlot(cells, num.pc = 100)
+```
+
+## tSNE visualization of cell cycle and Bsn expression after regression
+```{r}
+cells <- RunTSNE(cells, dims.use = 1:9, do.fast = T)
+TSNEPlot(cells, pt.size = 4)
+FeaturePlot(cells, "Bsn_rat", cols.use = brewer.pal(9, "YlOrRd"), pt.size = 4)
+```
+The cell cycle effect is removed and the cells now strongly cluster according to their Bsn expression
+
+## Store metadata (including cell cycle scores) from Seurat object
+Since their is currently no easy way to transfer the cell cycle corrected data from Seurat to Monocle directly we only export the calculated cell cycle scores and use these as covariates in the modelling.
+
+```{r}
+metadata <- new("AnnotatedDataFrame", data = cells@meta.data)
+```
+
+## Create new CellDataSet object used in the monocle analysis
+```{r}
+cells.monoc <- newCellDataSet(cellData = as.matrix(dge.matrix[,rownames(metadata)]), phenoData = metadata, expressionFamily = negbinomial.size(), lowerDetectionLimit = 0)
+fData(cells.monoc)$gene_short_name <- rownames(exprs(cells.monoc))
+cells.monoc <- estimateSizeFactors(cells.monoc)
+cells.monoc <- estimateDispersions(cells.monoc)
+```
+
+## Check that cell cycle correction works in the monocle framework
+```{r, warning = FALSE}
+cells.monoc <- reduceDimension(cells.monoc, max_components = 2, num_dim = 6,
+                        reduction_method = 'tSNE', verbose = T, residualModelFormulaStr = "~S.Score + G2M.Score")
+cells.monoc <- clusterCells(cells.monoc, num_clusters = 2, residualModelFormulaStr = "~S.Score + G2M.Score")
+plot_cell_clusters(cells.monoc, 1, 2, color = "Phase")
+```
+
+## Bsn expression plot
+```{r}
+bsn.transcripts <- t(exprs(cells.monoc["Bsn_rat",])/sizeFactors(cells.monoc))
+bsn.transcripts <- sort(bsn.transcripts, decreasing = FALSE)
+x <- 1:length(bsn.transcripts)
+plot(x = x, y=log10(bsn.transcripts+1), type='p', pch="O", xlab="cells ordered by Bsn expression", ylab="Bsn transcript number (log10)")
+```
+
+## Identify the cells with the lowest and highest 10% of Bsn expression
+```{r}
+Bsn_low <- quantile(exprs(cells.monoc)["Bsn_rat",], probs = 0.10)
+Bsn_high <- quantile(exprs(cells.monoc)["Bsn_rat",], probs = 0.90)
+```
+
+## Run monocle
+The strategy to determine a pseudotime trajectory is analogous to the paragraph "Ordering cells using known marker genes" from http://cole-trapnell-lab.github.io/monocle-release/docs/#alternative-choices-for-ordering-genes
+First cell populations with high an low Bsn expression are identified as hallmarks on which to base the pseudotime.
+```{r, warning = FALSE}
+Bsn_id <- row.names(subset(fData(cells.monoc), gene_short_name == "Bsn_rat"))
+cth <- newCellTypeHierarchy()
+cth <- addCellType(cth, "Bsn_low",
+      classify_func = function(x) { x[Bsn_id,] <= Bsn_low })
+cth <- addCellType(cth, "Bsn_high",
+      classify_func = function(x) { x[Bsn_id,] >= Bsn_high })
+cells.monoc <- classifyCells(cells.monoc, cth)
+```
+
+Next genes are identified that co-vary significantly between these populations
+```{r, warning = FALSE}
+marker_diff <- markerDiffTable(cells.monoc, cth, cores = 1, residualModelFormulaStr = "~S.Score + G2M.Score")
+semisup_clustering_genes <- row.names(marker_diff)[order(marker_diff$qval)][1:1000]
+```
+
+The top 1000 of these marker genes are now used to devise a pseudotime trajectory
+```{r, warning = FALSE}
+cells.monoc <- setOrderingFilter(cells.monoc, semisup_clustering_genes)
+cells.monoc <- reduceDimension(cells.monoc, max_components = 2, reduction_method = 'DDRTree', norm_method = 'log', residualModelFormulaStr = "~S.Score + G2M.Score")
+cells.monoc <- orderCells(cells.monoc)
+plot_cell_trajectory(cells.monoc, color_by = "State", cell_size = 2, show_branch_points = TRUE) + theme(legend.position = "right")
+```
+
+Bsn expression over pseudotime:
+```{r, warning = FALSE}
+plot_genes_in_pseudotime(cells.monoc["Bsn_rat",], color_by = "State", cell_size = 2)
+```
+As expected the Bsn expression correlates well with pseudotime
+
+## Identify genes significantly correlated with pseudotime
+```{r, warning = FALSE}
+diff_test_res <- differentialGeneTest(cells.monoc, fullModelFormulaStr = "~sm.ns(Pseudotime)")
+diff_test_res <- diff_test_res[order(diff_test_res$qval),]
+sig_gene_names <- row.names(subset(diff_test_res, qval < 0.1))
+```
+
+## Extract directionality of pseudotime correlation for each gene
+This is done by creating a heatmap of the genes significantly correlated with pseudotime over pseudotime and clustering in an up- and downregulated cluster with hclust. The heatmap is produced based on the sourcecode of plot_pseudotime_heatmap from the monocle package.
+```{r, warning = FALSE, results = 'hide'}
+cells.monoc.sub <- cells.monoc[sig_gene_names,]
+
+scale_max <- 3
+scale_min <- -3
+newdata <- data.frame(Pseudotime = seq(min(pData(cells.monoc.sub)$Pseudotime), 
+    max(pData(cells.monoc.sub)$Pseudotime), length.out = 100))
+  m <- genSmoothCurves(cells.monoc.sub, cores = 1, trend_formula = "~sm.ns(Pseudotime, df=3)", 
+    relative_expr = T, new_data = newdata)
+  m = m[!apply(m, 1, sum) == 0, ]
+  norm_method <- c("vstExprs", "log")
+  if (norm_method == "vstExprs" && is.null(cells.monoc.sub@dispFitInfo[["blind"]]$disp_func) == FALSE) {
+    m = vstExprs(cells.monoc.sub, expr_matrix = m)
+  } else if (norm_method == "log") {
+    m = log10(m + pseudocount)
+  }
+  m = m[!apply(m, 1, sd) == 0, ]
+  m = Matrix::t(scale(Matrix::t(m), center = TRUE))
+  m = m[is.na(row.names(m)) == FALSE, ]
+  m[is.nan(m)] = 0
+  m[m > scale_max] = scale_max
+  m[m < scale_min] = scale_min
+  heatmap_matrix <- m
+
+# compute distance
+dist <- as.dist(1-cor(t(heatmap_matrix))) #pearson
+# cluster distance
+hr <- hclust(d = dist, method = "ward.D")
+# cut tree
+mycl <- cutree(hr, k=2)
+```
+
+The results of the analysis are written to the file Pseudotime_correlation.txt ordered by signed -log10 p-value
+```{r, warning = FALSE}
+out <- data.frame(stringsAsFactors=FALSE, "gene_short_name" = names(mycl), "cluster" = mycl, "directionality" = -1, "log10_pval" = -log10(diff_test_res[names(mycl),]$pval))
+out[out$cluster == out["Bsn_rat",]$cluster,]$directionality <- 1
+out$log10_pval <- out$log10_pval*out$directionality
+out <- out[order(out$log10_pval, decreasing = TRUE),]
+write.table(out[,c("gene_short_name", "log10_pval")], file = "Pseudotime_correlation.txt", row.names = FALSE, col.names = FALSE, sep = "\t", quote = FALSE)
+```
+
+## Goterm heatmap
+A GO term enrichment analysis was performed using GSEA (see above). In the following section pseudotime heatmaps are created for representative GO terms derived from this analysis. All genes are displayed, which are both part of the given GO term and the genes significantly correlated with pseudotime. 
+
+Set GO terms
+```{r, warning = FALSE}
+go.terms <- as.character(c('GO:0006986', 'GO:0006096'))
+go.term.names <- c("response to unfolded protein", "glycolytic process")
+```
+
+The genes belonging to one biological process are extracted from a collection from the Bader lab: http://download.baderlab.org/EM_Genesets/current_release/
+Genes Inferred from Electronic Annotation (IEA) are excluded. The genes are stored in named lists in the GO_terms folder
+```{r, warning = FALSE}
+dir.create("GO_terms", showWarnings = FALSE)
+input.genes <- vector(mode='list')
+for(k in 1:length(go.terms)) {
+  read.from.file <- read.pattern(file = "MOUSE_GO_bp_no_GO_iea_symbol.gmt.txt", pattern = paste0(go.terms[[k]], ".*"), sep = "\t", colClasses = "character")
+  input.genes[[go.term.names[k]]] <- as.character(read.from.file[3:length(read.from.file)])
+  write(input.genes[[k]], file = paste0("./GO_terms/", "GO_", substr(go.terms[k], 4, nchar(go.terms[k])), " ", go.term.names[k], ".txt"))
+}
+```
+
+Create GO term heatmaps seperately for each GO term (to allow for easy scaling, when different numbers of genes are plotted)
+Note: The heatmap is not displayed correctly in the R notebook format.
+```{r, results='hide', warning = FALSE}
+source("GroupedPseudotimeHeatmap.R")
+GroupedPseudotimeHeatmap(monoc.object = cells.monoc[sig_gene_names,], path.to.genelists = "./GO_terms", markergene = "Bsn_rat", pdf.folder = "./GO_terms_heatmaps")
+```
+
+## Analyze branching point
+Using the BEAM function from the monocle package the branching point in the pseudotime trajectory can be analysed to identify marker genes that distinguish the branches. These genes were used as an input for a GO term analysis using Toppgene (https://toppgene.cchmc.org/) [@Chen2009].
+
+Note: The heatmap is not displayed correctly in the R notebook format.
+```{r, results='hide', warning = FALSE}
+BEAM_res <- BEAM(cells.monoc, branch_point = 1, cores = 1)
+BEAM_res <- BEAM_res[order(BEAM_res$qval),]
+BEAM_res <- BEAM_res[,c("gene_short_name", "pval", "qval")]
+branch_heatmap <- plot_genes_branched_heatmap(cells.monoc[row.names(subset(BEAM_res, qval < 1e-4)),],
+                            branch_point = 1,
+                            num_clusters = 2,
+                            cores = 1,
+                            use_gene_short_name = T,
+                            show_rownames = T,
+                            return_heatmap = T)
+
+write(rownames(subset(branch_heatmap$annotation_row, Cluster == 1)), "Branch1.txt") #corresponds to the green state
+write(rownames(subset(branch_heatmap$annotation_row, Cluster == 2)), "Branch2.txt") #corresponds to the blue state
+```
+
+##References
